@@ -2,7 +2,8 @@
 
 A project organized around CRISP-DM phases. The current pipeline downloads
 SciFact, JuriFindIT, mMARCO Italian, and MS MARCO, then prepares a common format
-for information retrieval experiments.
+for information retrieval experiments. A separate evaluator scores saved
+retrieval runs against these prepared judgments.
 
 ## Repository structure
 
@@ -10,6 +11,7 @@ for information retrieval experiments.
 | --- | --- |
 | [data-understanding/](data-understanding/README.md) | Download datasets and document their source formats. |
 | [data-preparation/](data-preparation/README.md) | Convert downloaded data into a common corpus, query, and relevance format. |
+| [evaluation/](evaluation/README.md) | Score and compare saved retrieval runs using standard IR metrics. |
 | [theory/](theory/) | Reference reading. |
 
 Each implemented phase contains `scripts/` for code and `data/` for generated
@@ -22,22 +24,26 @@ Create the environment once; reuse it for subsequent runs.
 
 ```bash
 python3 -m venv .venv
-./.venv/bin/python -m pip install datasets==5.0.1 ir_datasets==0.6.3
+./.venv/bin/python -m pip install -r requirements.txt
 ```
 
-These are the direct dependency versions in the working environment, which uses
-Python 3.14.7. Transitive dependencies are not pinned. Preparation itself uses
-only the Python standard library.
+The root [requirements.txt](requirements.txt) covers all current scripts and
+tests, pinned to the direct dependency versions in the working environment
+(Python 3.14.7). Pip installs their transitive dependencies automatically; those
+versions are not pinned. Preparation itself uses only the Python standard library.
 
 ## Workflow
 
 1. Run the four download scripts in [Data Understanding](data-understanding/README.md#run).
 2. After all downloads succeed, run [Data Preparation](data-preparation/README.md#run).
-3. Use the standardized files in `data-preparation/data/` for subsequent work.
+3. Use the standardized files in `data-preparation/data/` to build retrieval
+   models and save ranked results. Modeling is not implemented yet.
+4. Run [Evaluation](evaluation/README.md#run) on those saved results.
 
 The scripts resolve dataset paths relative to their own locations. Commands in
 these READMEs assume the repository root only to locate the scripts and Python.
-Rerunning a script overwrites its output files.
+Download and preparation scripts overwrite their output files when rerun.
+Evaluation requires `--overwrite` to replace existing reports.
 
 Downloads require network access when source data is not already cached. The
 MARCO datasets are large: allow disk space for downloaded exports, prepared
