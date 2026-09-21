@@ -2,8 +2,7 @@ from pathlib import Path
 
 from datasets import load_dataset
 
-
-DATA_DIR = Path("data")
+DATA_DIR = Path(__file__).resolve().parents[1] / "data"
 
 
 def download_scifact():

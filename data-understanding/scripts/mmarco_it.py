@@ -1,12 +1,11 @@
-from pathlib import Path
 import json
 import os
 import sys
+from pathlib import Path
 
 import ir_datasets
 
-
-DATA_DIR = Path("data")
+DATA_DIR = Path(__file__).resolve().parents[1] / "data"
 
 
 def ensure_utf8_mode():
@@ -56,57 +55,33 @@ def download_mmarco_it():
         ),
     )
 
-    print("Downloading and saving train queries...")
-    write_jsonl(
-        output_dir / "queries-train.jsonl",
-        (
-            {
-                "query_id": query.query_id,
-                "text": query.text,
-            }
-            for query in train_dataset.queries_iter()
-        ),
-    )
+    for split_name, dataset in (("train", train_dataset), ("dev", dev_dataset)):
+        print(f"Downloading and saving {split_name} queries...")
+        write_jsonl(
+            output_dir / f"queries-{split_name}.jsonl",
+            (
+                {
+                    "query_id": query.query_id,
+                    "text": query.text,
+                }
+                for query in dataset.queries_iter()
+            ),
+        )
 
-    print("Downloading and saving train qrels...")
-    write_jsonl(
-        qrels_dir / "train.jsonl",
-        (
-            {
-                "query_id": qrel.query_id,
-                "doc_id": qrel.doc_id,
-                "relevance": qrel.relevance,
-            }
-            for qrel in train_dataset.qrels_iter()
-        ),
-    )
+        print(f"Downloading and saving {split_name} qrels...")
+        write_jsonl(
+            qrels_dir / f"{split_name}.jsonl",
+            (
+                {
+                    "query_id": qrel.query_id,
+                    "doc_id": qrel.doc_id,
+                    "relevance": qrel.relevance,
+                }
+                for qrel in dataset.qrels_iter()
+            ),
+        )
 
-    print("Downloading and saving dev queries...")
-    write_jsonl(
-        output_dir / "queries-dev.jsonl",
-        (
-            {
-                "query_id": query.query_id,
-                "text": query.text,
-            }
-            for query in dev_dataset.queries_iter()
-        ),
-    )
-
-    print("Downloading and saving dev qrels...")
-    write_jsonl(
-        qrels_dir / "dev.jsonl",
-        (
-            {
-                "query_id": qrel.query_id,
-                "doc_id": qrel.doc_id,
-                "relevance": qrel.relevance,
-            }
-            for qrel in dev_dataset.qrels_iter()
-        ),
-    )
-
-    print("\nmMARCO Italian ready.")
+    print("mMARCO Italian ready.")
 
 
 if __name__ == "__main__":

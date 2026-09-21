@@ -2,8 +2,7 @@ from pathlib import Path
 
 from datasets import load_dataset
 
-
-DATA_DIR = Path("data")
+DATA_DIR = Path(__file__).resolve().parents[1] / "data"
 
 
 def download_jurifindit():
@@ -30,9 +29,7 @@ def download_jurifindit():
     corpus.to_json(output_dir / "corpus.jsonl")
 
     for split_name, split in questions.items():
-        split.to_json(
-            output_dir / f"questions-{split_name}.jsonl"
-        )
+        split.to_json(output_dir / f"questions-{split_name}.jsonl")
 
     print("JuriFindIT ready.")
 
