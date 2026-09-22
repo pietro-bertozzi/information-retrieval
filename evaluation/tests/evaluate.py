@@ -10,6 +10,7 @@ import math
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 import pytrec_eval
 
@@ -37,6 +38,33 @@ class EvaluationTests(unittest.TestCase):
     def invoke(self, arguments):
         with contextlib.redirect_stdout(io.StringIO()):
             evaluate.main(arguments)
+
+    def test_default_outputs_are_grouped_by_dataset_and_split(self):
+        data_dir = self.directory / "prepared"
+        output_dir = self.directory / "reports"
+        run = self.write("model.trec", "q Q0 a 1 1 model\n")
+        for dataset in ("first", "second"):
+            for split in ("train", "test"):
+                qrels = data_dir / dataset / "qrels" / f"{split}.jsonl"
+                qrels.parent.mkdir(parents=True, exist_ok=True)
+                qrels.write_text(
+                    json.dumps({"query_id": "q", "doc_id": "a", "relevance": 1}),
+                    encoding="utf-8",
+                )
+                with patch.object(evaluate, "DATA_DIR", data_dir):
+                    with patch.object(evaluate, "OUTPUT_DIR", output_dir):
+                        self.invoke([
+                            "--dataset", dataset, "--split", split,
+                            "--run", str(run), "--metrics", "AP",
+                        ])
+                destination = output_dir / dataset / split
+                self.assertEqual(
+                    {path.name for path in destination.iterdir()},
+                    {"report.json", "summary.csv", "per-query.csv"},
+                )
+                report = json.loads((destination / "report.json").read_text())
+                self.assertEqual(report["runs"][0]["aggregate"]["AP"], 1)
+        self.assertFalse((output_dir / "report.json").exists())
 
     def test_known_binary_scores(self):
         qrels = {"q": {"a": 1, "b": 1, "z": 0}}

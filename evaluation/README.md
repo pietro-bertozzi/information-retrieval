@@ -59,13 +59,13 @@ TREC ranks must be positive integers, but scores determine the evaluated order.
 ## Run
 
 Replace the example run paths below with outputs from your retrieval models.
-There are no retrieval models or real model runs bundled with this phase yet.
+The [Modelling phase](../modelling/README.md) provides eleven simple lexical baselines
+and commands for generating compatible runs.
 
 ```bash
 ./.venv/bin/python evaluation/scripts/evaluate.py \
     --dataset scifact \
-    --run path/to/bm25.trec \
-    --output-dir evaluation/data/scifact
+    --run path/to/bm25.trec
 ```
 
 Evaluate several runs together for a shared comparison table:
@@ -74,11 +74,13 @@ Evaluate several runs together for a shared comparison table:
 ./.venv/bin/python evaluation/scripts/evaluate.py \
     --dataset scifact \
     --run path/to/bm25.trec path/to/dense.jsonl \
-    --output-dir evaluation/data/scifact-comparison
+    --overwrite
 ```
 
 Run filenames serve as report labels and must be unique within an invocation.
-Use `--overwrite` to replace existing reports. All inputs are evaluated before
+Include every run you want to compare in the same invocation.
+Use `--overwrite` to replace the complete existing comparison; reports are not
+appended or merged. All inputs are evaluated before
 staged reports replace existing outputs, so invalid run files leave previous
 reports intact. Input files cannot be overwritten by report paths.
 
@@ -163,8 +165,22 @@ Use a separate validation protocol for tuning models or selecting parameters.
 
 ## Outputs
 
-By default, reports are written to `evaluation/data/`, which is ignored by Git.
-Use separate output directories for different datasets or splits.
+For prepared datasets, one comparison report set lives directly under
+`evaluation/data/<dataset>/<split>/`, which is ignored by Git. There are no
+experiment-group subfolders. Train and test remain separate to prevent mixing
+results from different query sets.
+
+```text
+evaluation/data/scifact/test/
+    per-query.csv
+    report.json
+    summary.csv
+```
+
+The three files contain all runs supplied for that dataset and split.
+`--output-dir` overrides the destination. With external `--qrels`, no dataset
+name is available: the fallback remains `evaluation/data/`; specify
+`--output-dir evaluation/data/<dataset>/<split>` to keep the same organization.
 
 | File | Contents |
 | --- | --- |
@@ -182,6 +198,44 @@ run's per-query scores while reporting. Large MARCO runs therefore require
 substantial RAM. Evaluate datasets separately. Source files are never modified.
 The evaluator checks file structure, but does not load the corpus to validate
 that every returned document ID exists in it.
+
+## JuriFindIT results
+
+All eleven models were evaluated on 2026-09-22 using 23,617 corpus documents,
+179 judged validation queries (prepared as `test`), and up to 1,000 results per
+query. Every model returned results for all 179 queries; no unjudged queries
+were ignored. All 57 default metrics are included in the generated reports.
+The following aggregate values are rounded to six decimals; MAP is reported
+as `AP` and MRR as `RR` in the output files.
+
+| Model | nDCG@10 | MRR@10 | MAP | Recall@1000 |
+| --- | --- | --- | --- | --- |
+| 1.1.1-term-overlap | 0.028016 | 0.028383 | 0.026819 | 0.494743 |
+| 1.1.2-term-overlap | 0.028016 | 0.028383 | 0.026819 | 0.494743 |
+| 1.2.1-document-coverage | 0.004268 | 0.002195 | 0.005195 | 0.359083 |
+| 1.3.1-jaccard | 0.137772 | 0.127208 | 0.125321 | 0.556488 |
+| 1.4.1-binary-cosine | 0.196051 | 0.182992 | 0.174172 | 0.640594 |
+| 1.4.2-term-frequency | 0.001230 | 0.005587 | 0.001027 | 0.090809 |
+| 1.5.1-log-term-frequency | 0.002061 | 0.006145 | 0.002179 | 0.190428 |
+| 1.6.1-bigram-overlap | 0.130471 | 0.130901 | 0.113274 | 0.603724 |
+| 1.7.1-stopword-overlap | 0.047787 | 0.044808 | 0.046433 | 0.704684 |
+| 1.8.1-idf-overlap | 0.070850 | 0.065647 | 0.064153 | 0.697028 |
+| 1.9.1-unigram-bigram-overlap | 0.074089 | 0.074370 | 0.064486 | 0.615360 |
+
+Binary cosine leads these baselines on nDCG@10, MRR@10, and MAP;
+stopword-filtered overlap has the highest Recall@1000. Versions 1.1.1 and 1.1.2
+match on all metrics, as expected from their identical rankings. These are
+validation results without parameter tuning, not held-out leaderboard scores.
+MAP uses the submitted ranking, which is limited to 1,000 results per query.
+
+Local generated reports (ignored by Git):
+
+- [summary.csv](data/jurifindit/test/summary.csv): all aggregate metrics.
+- [per-query.csv](data/jurifindit/test/per-query.csv): each query's metrics.
+- [report.json](data/jurifindit/test/report.json): metrics, coverage, and provenance.
+
+See [JuriFindIT modelling commands](../modelling/README.md#jurifindit) to reproduce
+the runs and comparison on Windows PowerShell.
 
 ## Verification
 

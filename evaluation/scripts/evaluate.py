@@ -239,7 +239,10 @@ def build_parser():
         "--relevance-level", type=int, default=1,
         help="minimum relevance grade for binary metrics (default: 1)",
     )
-    parser.add_argument("--output-dir", type=Path, default=OUTPUT_DIR)
+    parser.add_argument(
+        "--output-dir", type=Path,
+        help="default: evaluation/data/<dataset>/<split>; evaluation/data for --qrels",
+    )
     parser.add_argument(
         "--overwrite", action="store_true", help="replace existing reports"
     )
@@ -254,6 +257,10 @@ def main(argv=None):
             Path(args.dataset).name != args.dataset or args.dataset in (".", "..")
         ):
             raise ValueError("--dataset must be a directory name, not a path")
+        if args.output_dir is None:
+            args.output_dir = (
+                OUTPUT_DIR / args.dataset / args.split if args.dataset else OUTPUT_DIR
+            )
         qrels_path = args.qrels or (
             DATA_DIR / args.dataset / "qrels" / f"{args.split}.jsonl"
         )
