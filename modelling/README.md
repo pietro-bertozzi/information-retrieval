@@ -7,8 +7,8 @@ training, and depend only on the Python standard library. See the
 ## Versions
 
 Version numbers come first in script names, TREC filenames, and run tags.
-The first two versions remain unchanged. New scoring variants use successive
-minor numbers within the simple lexical-model family.
+The first two versions retain their original scoring behavior. New scoring
+variants use successive minor numbers within the simple lexical-model family.
 
 In the formulas below, `o` is the number of distinct shared words, `q` is the
 number of distinct query words, `d` is the number of distinct document words,
@@ -19,12 +19,12 @@ is the number of documents containing word `t`.
 | Version | Script | Score |
 | --- | --- | --- |
 | `1.1.1` | [term overlap](scripts/1.1.1-term-overlap.py) | `o` |
-| `1.1.2` | [query coverage](scripts/1.1.2-term-overlap.py) | `o / q` |
+| `1.1.2` | [query coverage](scripts/1.1.2-term-overlap-percentage.py) | `o / q` |
 | `1.2.1` | [document coverage](scripts/1.2.1-document-coverage.py) | `o / d` |
 | `1.3.1` | [Jaccard](scripts/1.3.1-jaccard.py) | `o / (q + d - o)` |
 | `1.4.1` | [binary cosine](scripts/1.4.1-binary-cosine.py) | `o / sqrt(q * d)` |
-| `1.4.2` | [term frequency](scripts/1.4.2-term-frequency.py) | Sum of `tf(t)` over distinct query words |
-| `1.5.1` | [log term frequency](scripts/1.5.1-log-term-frequency.py) | Sum of `ln(1 + tf(t))` over distinct query words |
+| `1.5.1` | [term frequency](scripts/1.5.1-term-frequency.py) | Sum of `tf(t)` over distinct query words |
+| `1.5.2` | [log term frequency](scripts/1.5.2-log-term-frequency.py) | Sum of `ln(1 + tf(t))` over distinct query words |
 | `1.6.1` | [bigram overlap](scripts/1.6.1-bigram-overlap.py) | Number of distinct adjacent word pairs shared by query and document |
 | `1.7.1` | [stopword-filtered overlap](scripts/1.7.1-stopword-overlap.py) | `o` after removing a small explicit list of common words |
 | `1.8.1` | [IDF-only overlap](scripts/1.8.1-idf-overlap.py) | Sum of `ln((N + 1) / (df(t) + 1)) + 1` over distinct shared words |
@@ -33,7 +33,7 @@ is the number of documents containing word `t`.
 Each version is a complete, standalone script with its own tokenization,
 indexing, scoring, input validation, and output handling. Code is intentionally
 repeated so versions can be read and changed independently. There is no shared
-modelling helper or modelling test folder.
+modelling helper. Tests in `modelling/tests/` cover retrieval sidecar output.
 
 Version 1.1.2 divides all scores for one query by the same constant, preserving
 rankings and evaluation metrics. The document-length variants can change the
@@ -84,6 +84,16 @@ document ID as strings, matching evaluation.
 
 ## Run
 
+The normal workflow runs retrieval and evaluation together from the repository root:
+
+```bash
+python run_experiments.py --dataset scifact
+```
+
+See the [root workflow](../README.md#workflow) for method selection, dataset
+selection, listing, and language overrides. The commands below are for running
+retrieval separately.
+
 Run these Linux commands from the repository root. For example, run Jaccard:
 
 ```bash
@@ -116,7 +126,7 @@ For example:
 
 ```text
 modelling/data/scifact/test/1.1.1-term-overlap.trec
-modelling/data/scifact/test/1.1.2-term-overlap.trec
+modelling/data/scifact/test/1.1.2-term-overlap-percentage.trec
 modelling/data/scifact/test/1.3.1-jaccard.trec
 ```
 
@@ -128,21 +138,33 @@ query_id Q0 doc_id rank score version-method
 
 Ranks start at 1. Each query has at most `--top-k` rows. Existing runs require
 `--overwrite` to replace them; failed input validation leaves previous runs
-intact. Generated runs under `modelling/data/` are ignored by Git.
+intact. A sibling `<version>-<method>.metadata.json` records dataset, split,
+method/version, configured `top_k`, and resolved language for the stopword model.
+Keep this file with its ranking: evaluation uses it to log configuration to MLflow.
+Both files are staged after input validation and replaced on successful retrieval.
+They are not a filesystem transaction; an interrupted replacement may require
+rerunning retrieval. Generated runs and sidecars under `modelling/data/` are ignored
+by Git. Sidecars are descriptive metadata, not content fingerprints.
 
-Compare all eleven versions with [Evaluation](../evaluation/README.md):
+Retrieval stays independent of MLflow. See [Tracking](../tracking/README.md) for
+storage, comparison, and the sidecar format for external methods.
+
+Run and compare all current versions with:
 
 ```bash
-./.venv/bin/python evaluation/scripts/evaluate.py \
-    --dataset scifact \
-    --run modelling/data/scifact/test/*.trec \
-    --overwrite
+python run_experiments.py --dataset scifact
 ```
+
+This selects the scripts currently on disk and excludes retired ranking files.
+For separately generated rankings, pass their exact paths to
+[Evaluation](../evaluation/README.md).
 
 The reports include aggregate and per-query metrics. Versions 1.1.1 and 1.1.2
 should match exactly; the other variants can change rankings. One shared report
 set is saved in `evaluation/data/scifact/test/`. The command replaces that report
-set with a comparison of every supplied run.
+set with a comparison of every supplied run. Each file also becomes a separate
+MLflow run in the `scifact` experiment. Methods evaluated in separate invocations
+can be compared there without rebuilding a combined report.
 These initial comparisons describe one dataset, rather than establishing which
 method will be best across datasets. Keep parameter tuning separate from final
 evaluation.
@@ -157,14 +179,25 @@ tuning is required. See the [comparison results](../evaluation/README.md#jurifin
 To reproduce in Windows PowerShell from the repository root:
 
 ```powershell
-foreach ($script in (Get-ChildItem modelling/scripts/*.py | Sort-Object Name)) {
-    & ./.venv/Scripts/python.exe -B $script.FullName --dataset jurifindit --split test --top-k 1000
-    if ($LASTEXITCODE -ne 0) { throw "Model failed: $($script.Name)" }
-}
-$runs = @(Get-ChildItem modelling/data/jurifindit/test/*.trec | Sort-Object Name | ForEach-Object FullName)
-& ./.venv/Scripts/python.exe -B evaluation/scripts/evaluate.py --dataset jurifindit --split test --run @runs
-if ($LASTEXITCODE -ne 0) { throw 'Evaluation failed' }
+& ./.venv/Scripts/python.exe -B run_experiments.py --dataset jurifindit
 ```
 
-Add `--overwrite` to the Python commands when intentionally replacing existing
-runs and reports. PowerShell expands the run paths explicitly through `$runs`.
+This refreshes the selected methods and local reports and logs new MLflow runs.
+Historical reports may use the earlier names for the renamed methods.
+
+## Adding a method
+
+Add a public Python script under `modelling/scripts/` with the common options
+`--dataset`, `--split`, `--top-k`, `--output-dir`, and `--overwrite`. It must write
+`<script-stem>.trec` and `<script-stem>.metadata.json` into `--output-dir`, exit
+nonzero on failure, and keep execution behind its `__main__` guard. `MODEL_NAME`
+must match the script stem. Empty rankings are valid; metadata must be present.
+Method-specific scalar options can be passed through the orchestrator's repeated
+`--method-option METHOD:OPTION=VALUE`. Common orchestration options cannot be
+overridden this way. Keep MLflow integration in the evaluator.
+
+## Verification
+
+```powershell
+& ./.venv/Scripts/python.exe -B -m unittest discover -s modelling/tests -p 'test_*.py' -v
+```

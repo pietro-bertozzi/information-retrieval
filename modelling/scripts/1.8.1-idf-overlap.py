@@ -109,7 +109,8 @@ def main(argv=None):
             raise ValueError(f"query file does not exist: {queries_path}")
         output_dir = args.output_dir or OUTPUT_DIR / args.dataset / args.split
         output_path = output_dir / f"{MODEL_NAME}.trec"
-        if output_path.exists() and not args.overwrite:
+        metadata_path = output_path.with_suffix(".metadata.json")
+        if (output_path.exists() or metadata_path.exists()) and not args.overwrite:
             raise ValueError(f"run exists: {output_path}; use --overwrite to replace it")
 
         print(f"Indexing {corpus_path}...", flush=True)
@@ -135,7 +136,21 @@ def main(argv=None):
                         print(f"Processed {query_count} queries...", flush=True)
             if query_count == 0:
                 raise ValueError(f"{queries_path}: query file is empty")
+            metadata = {
+                "dataset": args.dataset,
+                "split": args.split,
+                "parameters": {
+                    "method": MODEL_NAME.split("-", 1)[1],
+                    "version": MODEL_NAME.split("-", 1)[0],
+                    "top_k": args.top_k,
+                },
+            }
+            temporary_metadata = Path(temp) / metadata_path.name
+            temporary_metadata.write_text(
+                json.dumps(metadata, indent=2) + "\n", encoding="utf-8"
+            )
             temporary_path.replace(output_path)
+            temporary_metadata.replace(metadata_path)
         print(f"{matched_queries}/{query_count} queries matched; {result_count} results.")
         print(f"Run saved to {output_path.resolve()}")
     except (OSError, ValueError) as error:

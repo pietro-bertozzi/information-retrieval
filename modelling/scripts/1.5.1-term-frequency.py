@@ -1,15 +1,14 @@
-"""Rank documents by log-scaled occurrences of distinct query words."""
+"""Rank documents by total occurrences of distinct query words."""
 
 import argparse
 import heapq
 import json
-import math
 import re
 import tempfile
 from collections import Counter, defaultdict
 from pathlib import Path
 
-MODEL_NAME = "1.5.1-log-term-frequency"
+MODEL_NAME = "1.5.1-term-frequency"
 DATA_DIR = Path(__file__).resolve().parents[2] / "data-preparation" / "data"
 OUTPUT_DIR = Path(__file__).resolve().parents[1] / "data"
 TOKEN_PATTERN = re.compile(r"[^\W_]+")
@@ -61,7 +60,7 @@ def build_index(corpus_path):
 
 
 def score(frequency):
-    return math.log1p(frequency)
+    return frequency
 
 
 def retrieve(query, postings, top_k=1000):
@@ -70,15 +69,14 @@ def retrieve(query, postings, top_k=1000):
     terms = tokenize(query)
     if not terms:
         return []
-    contributions = defaultdict(list)
+    scores = Counter()
+    # Process query words in a consistent order.
     for term in sorted(terms):
         for doc_id, frequency in postings.get(term, ()):
-            contributions[doc_id].append(score(frequency))
-    # Accurate summation keeps equivalent contributions tied consistently.
-    scores = (
-        (doc_id, math.fsum(values)) for doc_id, values in contributions.items()
+            scores[doc_id] += score(frequency)
+    return heapq.nlargest(
+        top_k, scores.items(), key=lambda item: (item[1], item[0])
     )
-    return heapq.nlargest(top_k, scores, key=lambda item: (item[1], item[0]))
 
 
 def main(argv=None):
@@ -106,7 +104,8 @@ def main(argv=None):
             raise ValueError(f"query file does not exist: {queries_path}")
         output_dir = args.output_dir or OUTPUT_DIR / args.dataset / args.split
         output_path = output_dir / f"{MODEL_NAME}.trec"
-        if output_path.exists() and not args.overwrite:
+        metadata_path = output_path.with_suffix(".metadata.json")
+        if (output_path.exists() or metadata_path.exists()) and not args.overwrite:
             raise ValueError(f"run exists: {output_path}; use --overwrite to replace it")
 
         print(f"Indexing {corpus_path}...", flush=True)
@@ -132,7 +131,21 @@ def main(argv=None):
                         print(f"Processed {query_count} queries...", flush=True)
             if query_count == 0:
                 raise ValueError(f"{queries_path}: query file is empty")
+            metadata = {
+                "dataset": args.dataset,
+                "split": args.split,
+                "parameters": {
+                    "method": MODEL_NAME.split("-", 1)[1],
+                    "version": MODEL_NAME.split("-", 1)[0],
+                    "top_k": args.top_k,
+                },
+            }
+            temporary_metadata = Path(temp) / metadata_path.name
+            temporary_metadata.write_text(
+                json.dumps(metadata, indent=2) + "\n", encoding="utf-8"
+            )
             temporary_path.replace(output_path)
+            temporary_metadata.replace(metadata_path)
         print(f"{matched_queries}/{query_count} queries matched; {result_count} results.")
         print(f"Run saved to {output_path.resolve()}")
     except (OSError, ValueError) as error:

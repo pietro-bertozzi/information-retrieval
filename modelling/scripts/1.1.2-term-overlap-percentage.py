@@ -1,4 +1,4 @@
-"""Rank documents by total occurrences of distinct query words."""
+"""Rank documents by the fraction of distinct query words they contain."""
 
 import argparse
 import heapq
@@ -8,7 +8,7 @@ import tempfile
 from collections import Counter, defaultdict
 from pathlib import Path
 
-MODEL_NAME = "1.4.2-term-frequency"
+MODEL_NAME = "1.1.2-term-overlap-percentage"
 DATA_DIR = Path(__file__).resolve().parents[2] / "data-preparation" / "data"
 OUTPUT_DIR = Path(__file__).resolve().parents[1] / "data"
 TOKEN_PATTERN = re.compile(r"[^\W_]+")
@@ -50,17 +50,16 @@ def build_index(corpus_path):
     postings = defaultdict(list)
     document_count = 0
     for doc_id, text in read_records(corpus_path, "doc_id"):
-        frequencies = Counter(TOKEN_PATTERN.findall(text.lower()))
-        for term, frequency in frequencies.items():
-            postings[term].append((doc_id, frequency))
+        for term in tokenize(text):
+            postings[term].append(doc_id)
         document_count += 1
     if document_count == 0:
         raise ValueError(f"{corpus_path}: corpus is empty")
     return postings, document_count
 
 
-def score(frequency):
-    return frequency
+def score(overlap, query_length):
+    return overlap / query_length if query_length else 0.0
 
 
 def retrieve(query, postings, top_k=1000):
@@ -69,14 +68,14 @@ def retrieve(query, postings, top_k=1000):
     terms = tokenize(query)
     if not terms:
         return []
-    scores = Counter()
-    # Process query words in a consistent order.
-    for term in sorted(terms):
-        for doc_id, frequency in postings.get(term, ()):
-            scores[doc_id] += score(frequency)
-    return heapq.nlargest(
-        top_k, scores.items(), key=lambda item: (item[1], item[0])
+    overlaps = Counter()
+    for term in terms:
+        overlaps.update(postings.get(term, ()))
+    # Both formulas preserve overlap ordering. Ties match trec_eval ordering.
+    ranked = heapq.nlargest(
+        top_k, overlaps.items(), key=lambda item: (item[1], item[0])
     )
+    return [(doc_id, score(count, len(terms))) for doc_id, count in ranked]
 
 
 def main(argv=None):
@@ -104,7 +103,8 @@ def main(argv=None):
             raise ValueError(f"query file does not exist: {queries_path}")
         output_dir = args.output_dir or OUTPUT_DIR / args.dataset / args.split
         output_path = output_dir / f"{MODEL_NAME}.trec"
-        if output_path.exists() and not args.overwrite:
+        metadata_path = output_path.with_suffix(".metadata.json")
+        if (output_path.exists() or metadata_path.exists()) and not args.overwrite:
             raise ValueError(f"run exists: {output_path}; use --overwrite to replace it")
 
         print(f"Indexing {corpus_path}...", flush=True)
@@ -114,7 +114,7 @@ def main(argv=None):
         query_count = 0
         matched_queries = 0
         result_count = 0
-        with tempfile.TemporaryDirectory(prefix=".retrieval-", dir=output_dir) as temp:
+        with tempfile.TemporaryDirectory(prefix=".term-overlap-", dir=output_dir) as temp:
             temporary_path = Path(temp) / output_path.name
             with temporary_path.open("w", encoding="utf-8") as stream:
                 for query_id, text in read_records(queries_path, "query_id"):
@@ -130,7 +130,21 @@ def main(argv=None):
                         print(f"Processed {query_count} queries...", flush=True)
             if query_count == 0:
                 raise ValueError(f"{queries_path}: query file is empty")
+            metadata = {
+                "dataset": args.dataset,
+                "split": args.split,
+                "parameters": {
+                    "method": MODEL_NAME.split("-", 1)[1],
+                    "version": MODEL_NAME.split("-", 1)[0],
+                    "top_k": args.top_k,
+                },
+            }
+            temporary_metadata = Path(temp) / metadata_path.name
+            temporary_metadata.write_text(
+                json.dumps(metadata, indent=2) + "\n", encoding="utf-8"
+            )
             temporary_path.replace(output_path)
+            temporary_metadata.replace(metadata_path)
         print(f"{matched_queries}/{query_count} queries matched; {result_count} results.")
         print(f"Run saved to {output_path.resolve()}")
     except (OSError, ValueError) as error:
