@@ -2,3 +2,4 @@ datasets==5.0.1
 ir_datasets==0.6.3
 ir-measures==0.4.3
 pytrec-eval-terrier==0.5.10
+mlflow==3.16.1

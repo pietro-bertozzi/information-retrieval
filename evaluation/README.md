@@ -3,7 +3,9 @@
 Evaluate saved retrieval results against relevance judgments, independently of
 how a model retrieves or scores documents. The evaluator uses `ir-measures` and
 its `pytrec_eval`, MS MARCO reciprocal-rank, and judgment-coverage backends.
-Metric formulas are supplied by these established implementations.
+Metric formulas are supplied by these established implementations. Successful
+evaluations log one MLflow run per input file in an experiment named after the
+dataset. See [Tracking](../tracking/README.md) to open the UI and configure storage.
 
 ## Setup
 
@@ -21,7 +23,10 @@ query/document IDs exactly, including leading zeros.
 For a prepared dataset, `--dataset scifact` selects
 `data-preparation/data/scifact/qrels/test.jsonl`. Other dataset directory names
 are supported, and `--split train` selects training judgments. Alternatively,
-`--qrels PATH` accepts an external judgment file.
+`--qrels PATH` accepts an external judgment file. Tracking external judgments
+requires an explicit `--dataset NAME --split SPLIT` to identify their experiment
+and population. These labels do not select prepared inputs when `--qrels` is given.
+Use `--source-split LABEL` when an external source uses a different split name.
 
 Two formats are supported:
 
@@ -58,6 +63,17 @@ TREC ranks must be positive integers, but scores determine the evaluated order.
 
 ## Run
 
+For retrieval followed by evaluation, run the following from the repository root:
+
+```bash
+python run_experiments.py --dataset scifact
+```
+
+The orchestrator passes only the current invocation's rankings, once per
+dataset/split. See the
+[root workflow](../README.md#workflow). The commands below evaluate existing
+rankings directly.
+
 Replace the example run paths below with outputs from your retrieval models.
 The [Modelling phase](../modelling/README.md) provides eleven simple lexical baselines
 and commands for generating compatible runs.
@@ -78,17 +94,26 @@ Evaluate several runs together for a shared comparison table:
 ```
 
 Run filenames serve as report labels and must be unique within an invocation.
-Include every run you want to compare in the same invocation.
+Include every run you want in the local CSV comparison in the same invocation.
+MLflow comparisons also include runs logged by earlier invocations.
 Use `--overwrite` to replace the complete existing comparison; reports are not
 appended or merged. All inputs are evaluated before
 staged reports replace existing outputs, so invalid run files leave previous
-reports intact. Input files cannot be overwritten by report paths.
+reports intact. MLflow logging starts only after local reports are complete.
+`--overwrite` replaces local reports only; it never replaces past MLflow runs.
+Tracking failures exit with an error and preserve the completed local reports.
+Earlier successful uploads remain available; a rerun creates new runs, so filter
+for finished runs and select the intended execution when comparing results.
+Use `--no-tracking` to explicitly produce only local reports, or `--tracking-uri`
+to override the default store. `--log-rankings` additionally uploads the input
+rankings; reports and available retrieval metadata are always uploaded.
+Input files cannot be overwritten by report paths.
 
 To evaluate external judgments or select particular metrics:
 
 ```bash
 ./.venv/bin/python evaluation/scripts/evaluate.py \
-    --qrels path/to/qrels.txt \
+    --qrels path/to/qrels.txt --dataset custom --split test \
     --run path/to/model.trec \
     --metrics nDCG@10 MRR@10 MAP Recall@100 Recall@1000 Precision@10 \
     --output-dir evaluation/data/custom
@@ -178,9 +203,10 @@ evaluation/data/scifact/test/
 ```
 
 The three files contain all runs supplied for that dataset and split.
-`--output-dir` overrides the destination. With external `--qrels`, no dataset
-name is available: the fallback remains `evaluation/data/`; specify
-`--output-dir evaluation/data/<dataset>/<split>` to keep the same organization.
+`--output-dir` overrides the destination. With external `--qrels` and no dataset
+name in local-only mode, the fallback remains `evaluation/data/`.
+Tracked external qrels require dataset/split labels and use the corresponding
+`evaluation/data/<dataset>/<split>/` destination.
 
 | File | Contents |
 | --- | --- |
@@ -242,12 +268,14 @@ the runs and comparison on Windows PowerShell.
 Run the regression suite without downloading data or running a retrieval model:
 
 ```bash
-./.venv/bin/python -B -m unittest discover -s evaluation/tests -p evaluate.py -v
+./.venv/bin/python -B -m unittest discover -s evaluation/tests -p '*.py' -v
 ```
 
 Tests cover known metric values, agreement with `trec_eval`, graded judgments,
 missing queries, empty runs, tied scores, invalid inputs, format equivalence,
-and multi-run report generation.
+and multi-run report generation. Tracking tests use a temporary SQLite store and
+check experiment/split assignment, exact metrics, artifacts, minimal metadata,
+local-only operation, repeat evaluations, and upload failures.
 
 ## References
 

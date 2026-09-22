@@ -5,9 +5,12 @@ import csv
 import gzip
 import json
 import math
+import os
 import re
+import subprocess
 import sys
 import tempfile
+import time
 from datetime import datetime, timezone
 from importlib.metadata import version
 from pathlib import Path
@@ -18,6 +21,7 @@ from ir_measures.providers import FallbackProvider
 ROOT_DIR = Path(__file__).resolve().parents[2]
 DATA_DIR = ROOT_DIR / "data-preparation" / "data"
 OUTPUT_DIR = Path(__file__).resolve().parents[1] / "data"
+TRACKING_DIR = ROOT_DIR / "tracking" / "data"
 DEFAULT_CUTOFFS = (1, 3, 5, 10, 20, 100, 1000)
 FULL_METRICS = ("AP", "RR", "nDCG", "Rprec", "Bpref", "SetP", "SetR", "SetF")
 CUTOFF_METRICS = ("nDCG", "AP", "RR", "P", "R", "Success", "Judged")
@@ -211,14 +215,171 @@ def evaluate_run(qrels, run, metrics, relevance_level=1, evaluator=None):
     return {"aggregate": aggregate, "coverage": coverage}, per_query
 
 
+def read_metadata(path, dataset, split):
+    """Read optional retrieval settings without inferring them from rankings."""
+    suffixes = "".join(path.suffixes[-2:]) if path.suffix.lower() == ".gz" else path.suffix
+    metadata_path = path.with_name(path.name.removesuffix(suffixes) + ".metadata.json")
+    if not metadata_path.exists():
+        return None
+    metadata = json.loads(metadata_path.read_text(encoding="utf-8-sig"))
+    if not isinstance(metadata, dict) or not isinstance(metadata.get("parameters"), dict):
+        raise ValueError(f"{metadata_path}: expected an object with parameters")
+    for field, expected in (("dataset", dataset), ("split", split)):
+        if expected is not None and metadata.get(field) != expected:
+            raise ValueError(f"{metadata_path}: {field} does not match evaluation")
+    for key, value in metadata["parameters"].items():
+        if not isinstance(key, str) or not re.fullmatch(r"[A-Za-z0-9_.-]+", key):
+            raise ValueError(f"{metadata_path}: invalid parameter name {key!r}")
+        if not isinstance(value, (str, int, float, bool)) or (
+            isinstance(value, float) and not math.isfinite(value)
+        ):
+            raise ValueError(f"{metadata_path}: parameters must be finite scalar values")
+    top_k = metadata["parameters"].get("top_k")
+    if top_k is not None and (type(top_k) is not int or top_k < 1):
+        raise ValueError(f"{metadata_path}: top_k must be a positive integer")
+    return metadata
+
+
+def metric_key(name):
+    """Encode the canonical names emitted by build_metrics for MLflow."""
+    match = re.fullmatch(r"([A-Za-z]+)(?:\(rel=([1-9][0-9]*)\))?(?:@([1-9][0-9]*))?", name)
+    if not match:
+        raise ValueError(f"unsupported canonical metric name: {name}")
+    base, relevance, cutoff = match.groups()
+    return "ir." + base + (f"_rel_{relevance}" if relevance else "") + (
+        f"_at_{cutoff}" if cutoff else ""
+    )
+
+
+def log_tracking(report, output_dir, tracking_uri=None, log_rankings=False):
+    """Upload validated reports; scoring and local exports do not depend on MLflow."""
+    try:
+        from mlflow import MlflowClient
+        from mlflow.entities import Metric, Param
+    except ImportError as error:
+        raise RuntimeError("install requirements.txt or use --no-tracking") from error
+
+    uri = tracking_uri or os.environ.get("MLFLOW_TRACKING_URI")
+    local = not uri
+    if local:
+        TRACKING_DIR.mkdir(parents=True, exist_ok=True)
+        uri = f"sqlite:///{(TRACKING_DIR / 'mlflow.db').as_posix()}"
+    try:
+        client = MlflowClient(tracking_uri=uri)
+        experiment = client.get_experiment_by_name(report["dataset"])
+        if experiment is None:
+            artifact_location = (
+                (TRACKING_DIR / "artifacts" / report["dataset"]).as_uri() if local else None
+            )
+            experiment_id = client.create_experiment(
+                report["dataset"], artifact_location=artifact_location
+            )
+        else:
+            if experiment.lifecycle_stage != "active":
+                raise ValueError(f"experiment {report['dataset']!r} is deleted; restore it first")
+            experiment_id = experiment.experiment_id
+        tags = {
+            "dataset": report["dataset"], "split": report["split"],
+            "source_split": report["source_split"],
+        }
+        try:
+            revision = subprocess.run(
+                ["git", "rev-parse", "HEAD"], cwd=ROOT_DIR,
+                capture_output=True, text=True, check=True,
+            ).stdout.strip()
+        except (OSError, subprocess.CalledProcessError):
+            revision = None
+        if revision:
+            tags["evaluation.git_revision"] = revision
+        mapping = {name: metric_key(name) for name in report["metrics"]}
+        for result in report["runs"]:
+            parameters = {
+                "evaluation.relevance_level": report["relevance_level"],
+                "evaluation.metrics": ",".join(report["metrics"]),
+                **{f"evaluation.{key}": report[key] for key in (
+                    "query_policy", "tie_policy", "ndcg_gain"
+                )},
+            }
+            metadata = result.get("retrieval")
+            if metadata:
+                parameters.update({
+                    f"retrieval.{key}": value for key, value in metadata["parameters"].items()
+                })
+            run = client.create_run(experiment_id, tags={
+                **tags, "mlflow.runName": f"{result['name']} - {report['split']}",
+                "retrieval.metadata": "available" if metadata else "unknown",
+            })
+            run_id = run.info.run_id
+            print(f"MLflow run for {result['name']}: {run_id}", flush=True)
+            try:
+                values = {mapping[key]: value for key, value in result["aggregate"].items()}
+                values.update({f"coverage.{key}": value for key, value in result["coverage"].items()})
+                timestamp = int(time.time() * 1000)
+                client.log_batch(
+                    run_id,
+                    metrics=[Metric(key, value, timestamp, 0) for key, value in values.items()],
+                    params=[Param(key, str(value)) for key, value in parameters.items()],
+                    synchronous=True,
+                )
+                with tempfile.TemporaryDirectory(prefix="mlflow-evaluation-") as temporary:
+                    artifacts = Path(temporary)
+                    single_report = {**report, "runs": [result]}
+                    (artifacts / "report.json").write_text(
+                        json.dumps(single_report, indent=2, ensure_ascii=False, allow_nan=False) + "\n",
+                        encoding="utf-8",
+                    )
+                    (artifacts / "metric-names.json").write_text(
+                        json.dumps(mapping, indent=2) + "\n", encoding="utf-8"
+                    )
+                    if metadata:
+                        (artifacts / "retrieval.json").write_text(
+                            json.dumps(metadata, indent=2, ensure_ascii=False) + "\n",
+                            encoding="utf-8",
+                        )
+                    for filename in ("summary.csv", "per-query.csv"):
+                        with (output_dir / filename).open(encoding="utf-8", newline="") as source:
+                            reader = csv.DictReader(source)
+                            with (artifacts / filename).open("w", encoding="utf-8", newline="") as target:
+                                writer = csv.DictWriter(target, fieldnames=reader.fieldnames)
+                                writer.writeheader()
+                                for row in reader:
+                                    if row["run"] == result["name"]:
+                                        writer.writerow(row)
+                    client.log_artifacts(run_id, str(artifacts))
+                if log_rankings:
+                    client.log_artifact(run_id, result["path"], artifact_path="rankings")
+                client.set_terminated(run_id, status="FINISHED")
+            except Exception:
+                # Preserve the original error even if the server is unavailable.
+                try:
+                    client.set_terminated(run_id, status="FAILED")
+                except Exception as status_error:
+                    print(f"Could not mark MLflow run {run_id} failed: {status_error}", file=sys.stderr)
+                raise
+    except Exception as error:
+        raise RuntimeError(
+            f"MLflow logging failed: {error}. Local reports remain in {output_dir.resolve()}; "
+            "earlier uploaded runs remain available. Re-evaluation creates new runs."
+        ) from error
+
+
 def build_parser():
     parser = argparse.ArgumentParser(description=__doc__)
-    source = parser.add_mutually_exclusive_group(required=True)
-    source.add_argument(
-        "--dataset", help="dataset directory under data-preparation/data"
+    parser.add_argument(
+        "--dataset", help="prepared dataset directory, or dataset identity with --qrels"
     )
-    source.add_argument("--qrels", type=Path, help="external JSONL or TREC judgments")
-    parser.add_argument("--split", choices=("train", "test"), default="test")
+    parser.add_argument("--qrels", type=Path, help="external JSONL or TREC judgments")
+    parser.add_argument(
+        "--split", help="prepared train/test split (default: test); required with tracked external qrels"
+    )
+    parser.add_argument("--source-split", help="original split label for external qrels")
+    parser.add_argument(
+        "--tracking-uri", help="MLflow URI; defaults to MLFLOW_TRACKING_URI or local SQLite"
+    )
+    parser.add_argument("--no-tracking", action="store_true", help="write local reports only")
+    parser.add_argument(
+        "--log-rankings", action="store_true", help="also upload submitted rankings to MLflow"
+    )
     parser.add_argument(
         "--run", type=Path, nargs="+", required=True, help="one or more run files"
     )
@@ -253,6 +414,19 @@ def main(argv=None):
     parser = build_parser()
     args = parser.parse_args(argv)
     try:
+        if not args.dataset and not args.qrels:
+            raise ValueError("provide --dataset or --qrels")
+        if args.qrels and not args.no_tracking and (not args.dataset or not args.split):
+            raise ValueError("tracked external --qrels require --dataset and --split")
+        if args.no_tracking and (args.tracking_uri or args.log_rankings):
+            raise ValueError("--no-tracking cannot be combined with tracking options")
+        if args.source_split and not args.qrels:
+            raise ValueError("--source-split is only for external --qrels")
+        args.split = args.split or "test"
+        if not args.qrels and args.split not in ("train", "test"):
+            raise ValueError("prepared --split must be train or test")
+        if Path(args.split).name != args.split or args.split in (".", ".."):
+            raise ValueError("--split must be a directory name, not a path")
         if args.dataset and (
             Path(args.dataset).name != args.dataset or args.dataset in (".", "..")
         ):
@@ -277,10 +451,19 @@ def main(argv=None):
                 raise ValueError(
                     f"report exists: {target}; use --overwrite to replace it"
                 )
+        metadata = [
+            read_metadata(path, args.dataset, args.split if args.dataset else None)
+            for path in args.run
+        ]
         metrics = build_metrics(args.metrics, args.cutoffs, args.relevance_level)
         qrels = read_qrels(qrels_path, args.qrels_format)
         evaluator = create_evaluator(metrics, qrels)
         metric_names = [str(measure) for measure in metrics]
+        source_split = args.source_split or args.split
+        if not args.qrels and args.split == "test":
+            source_split = {
+                "jurifindit": "validation", "msmarco": "dev", "mmarco-it": "dev"
+            }.get(args.dataset, args.split)
         report = {
             "schema_version": 1,
             "created_at": datetime.now(timezone.utc).isoformat(),
@@ -288,6 +471,7 @@ def main(argv=None):
             "qrels_format": file_format(qrels_path, args.qrels_format),
             "dataset": args.dataset,
             "split": args.split if args.dataset else None,
+            "source_split": source_split if args.dataset else None,
             "metrics": metric_names,
             "relevance_level": args.relevance_level,
             "query_policy": "all judged queries; missing results score zero",
@@ -314,7 +498,7 @@ def main(argv=None):
                     stream, fieldnames=["run", "query_id", *metric_names]
                 )
                 writer.writeheader()
-                for path in args.run:
+                for path, retrieval_metadata in zip(args.run, metadata):
                     run = read_run(path, args.run_format)
                     result, per_query = evaluate_run(
                         qrels, run, metrics, args.relevance_level, evaluator
@@ -324,6 +508,8 @@ def main(argv=None):
                         "path": str(path.resolve()),
                         "format": file_format(path, args.run_format),
                     })
+                    if retrieval_metadata is not None:
+                        result["retrieval"] = retrieval_metadata
                     report["runs"].append(result)
                     for query_id, values in per_query.items():
                         writer.writerow({
@@ -360,6 +546,8 @@ def main(argv=None):
             for name in report_names:
                 (staging / name).replace(args.output_dir / name)
         print(f"Reports saved to {args.output_dir.resolve()}")
+        if not args.no_tracking:
+            log_tracking(report, args.output_dir, args.tracking_uri, args.log_rankings)
     except (OSError, ValueError, RuntimeError) as error:
         parser.exit(2, f"error: {error}\n")
 

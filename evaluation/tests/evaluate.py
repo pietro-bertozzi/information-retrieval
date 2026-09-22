@@ -37,7 +37,7 @@ class EvaluationTests(unittest.TestCase):
 
     def invoke(self, arguments):
         with contextlib.redirect_stdout(io.StringIO()):
-            evaluate.main(arguments)
+            evaluate.main([*arguments, "--no-tracking"])
 
     def test_default_outputs_are_grouped_by_dataset_and_split(self):
         data_dir = self.directory / "prepared"
