@@ -1,0 +1,32 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Retrieval lab · Evaluation explorer</title>
+<style>/* DASHBOARD_CSS */</style>
+</head>
+<body>
+<aside id="template-notice" style="padding:24px;margin:20px;border:2px solid #087f76;background:#edf5f1;font:16px/1.6 Segoe UI,Arial,sans-serif">
+<strong>This is the source template, not the generated dashboard.</strong><br>
+<a href="../data/index.html">Open the generated evaluation dashboard</a> in your browser.
+If it has not been built yet, run <code>./.venv/Scripts/python.exe -B visualization/scripts/build.py</code> from the repository root.
+</aside>
+<header><div class="brand"><span class="mark">IR</span> RETRIEVAL LAB <span class="tag">Evaluation explorer</span></div><span class="offline">● Offline report</span></header>
+<main>
+<div class="intro"><div><p class="eyebrow">FROM SCORES TO UNDERSTANDING</p><h1>Explore your evaluations.</h1><p class="muted">Compare models, follow retrieval depth, and find the queries that make the difference.</p></div></div>
+<section class="toolbar" aria-label="Report controls">
+<label>Dataset<select id="dataset"></select></label><label>Split / report<select id="report"></select></label><label>Metric<select id="metric"></select></label><label>Baseline<select id="baseline"></select></label>
+</section>
+<p id="description" class="explanation"></p>
+<div id="cards" class="cards"></div>
+<nav aria-label="Dashboard views"><button data-tab="overview" aria-pressed="true">Overview</button><button data-tab="depth" aria-pressed="false">Retrieval depth</button><button data-tab="queries" aria-pressed="false">Query analysis</button><button data-tab="details" aria-pressed="false">Evaluation details</button></nav>
+<details class="models"><summary>Choose models <span id="selection-count"></span></summary><div id="models"></div></details>
+<section id="overview" class="panel"><div class="section-title"><div><h2>Model comparison</h2><p id="comparison-hint" class="muted">Higher scores are better. Differences are absolute changes from the baseline.</p></div><button id="download">Export table CSV</button></div><div id="bars" class="bars"></div><div class="table-wrap"><table><thead><tr><th><button data-sort="name">Model ↕</button></th><th><button data-sort="score">Score ↕</button></th><th><button data-sort="delta">Δ baseline ↕</button></th><th>Queries with results</th><th>Returned depth</th></tr></thead><tbody id="ranking"></tbody></table></div></section>
+<section id="depth" class="panel" hidden><h2>Performance across retrieval depth</h2><p class="muted">Compare the selected metric family at each saved cutoff. The horizontal axis uses logarithmic spacing.</p><div id="curve"></div><div id="legend" class="legend"></div><div id="depth-table" class="table-wrap"></div></section>
+<section id="queries" class="panel" hidden><h2>Where do models differ?</h2><p class="muted">Compare two models on the same judged queries. Positive differences favor the candidate. Query IDs are shown exactly as saved.</p><div class="query-controls"><label>Candidate<select id="candidate"></select></label><label>Show<select id="outcome"><option value="all">All queries</option><option value="wins">Candidate wins</option><option value="losses">Candidate losses</option><option value="ties">Ties</option></select></label><label>Query ID<input id="search" type="search" placeholder="Filter by ID"></label><label>Sort<select id="query-sort"><option value="absolute">Largest difference</option><option value="gain">Largest gain</option><option value="loss">Largest loss</option><option value="id">Query ID</option></select></label></div><p id="query-status" role="status" aria-live="polite"></p><div class="table-wrap"><table><thead><tr><th>Query ID</th><th>Baseline</th><th>Candidate</th><th>Difference</th></tr></thead><tbody id="query-rows"></tbody></table></div><div class="pagination"><button id="previous">← Previous</button><span id="page"></span><button id="next">Next →</button></div></section>
+<section id="details" class="panel" hidden><h2>Evaluation details</h2><p class="muted">These values come from the saved evaluator report. Scores describe this query population and submitted retrieval depth.</p><dl id="metadata"></dl></section>
+<footer>Built from saved evaluation reports · No metrics are recomputed · Share this entire folder to preserve query analysis</footer>
+</main>
+<script id="report-data" type="application/json">__REPORT_DATA__</script>
+<script>/* DASHBOARD_JS */</script>
+</body></html>

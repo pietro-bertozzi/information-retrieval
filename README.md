@@ -13,6 +13,7 @@ ranked results, and a separate evaluator scores them against prepared judgments.
 | [data-preparation/](data-preparation/README.md) | Convert downloaded data into a common corpus, query, and relevance format. |
 | [modelling/](modelling/README.md) | Generate versioned retrieval runs with simple lexical baselines. |
 | [evaluation/](evaluation/README.md) | Score and compare saved retrieval runs using standard IR metrics. |
+| [visualization/](visualization/README.md) | Explore evaluation reports with an interactive offline dashboard. |
 | [theory/](theory/) | Reference reading. |
 
 Each implemented phase contains `scripts/` for code and `data/` for generated
@@ -41,6 +42,7 @@ only the Python standard library.
 3. Run [Modelling](modelling/README.md#run) to generate versioned retrieval results
    from the standardized files in `data-preparation/data/`.
 4. Run [Evaluation](evaluation/README.md#run) on those saved results.
+5. Build [Visualization](visualization/README.md#build-and-open) to explore the comparisons in a browser.
 
 The scripts resolve dataset paths relative to their own locations. Commands in
 these READMEs assume the repository root only to locate the scripts and Python.
