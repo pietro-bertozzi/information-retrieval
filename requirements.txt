@@ -3,3 +3,5 @@ ir_datasets==0.6.3
 ir-measures==0.4.3
 pytrec-eval-terrier==0.5.10
 mlflow==3.16.1
+qdrant-client==1.19.1
+fastembed==0.8.1

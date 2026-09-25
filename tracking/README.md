@@ -7,7 +7,7 @@ The MLflow UI replaces the former custom evaluation dashboard.
 ## Local workflow
 
 Install the root `requirements.txt`, then run
-`python run_experiments.py --dataset scifact` from the repository root. It invokes
+`python -m experiments.run_experiments --dataset scifact` from the repository root. It invokes
 the evaluator, which owns all MLflow logging. No server is required
 to log locally. The evaluator uses an absolute SQLite URI rooted at this repository
 and stores everything under `tracking/data/`, which is ignored by Git:
@@ -46,8 +46,9 @@ artifact placement is managed by MLflow/the server. Keep credentials outside cod
 
 Filter by `tags.split` before comparing metrics. The source split is also recorded:
 JuriFindIT `test` means `validation`, and MARCO `test` means `dev`. Compare the same
-data revision and evaluation settings; the minimal metadata does not fingerprint
-corpora or detect dataset changes.
+data revision and evaluation settings. Lexical metadata does not fingerprint
+corpora; dense metadata additionally records a corpus fingerprint for index
+compatibility.
 
 Select runs to compare aggregate metrics and retrieval parameters. Useful columns
 include `ir.nDCG_at_10`, `ir.RR_at_10`, `ir.AP`, and `ir.R_at_1000`. AP is MAP when
@@ -80,7 +81,7 @@ the code that produced an old ranking; it does not capture uncommitted changes.
 
 ## Retrieval metadata
 
-New lexical runs have a sibling `.metadata.json` file. For example,
+New retrieval runs have a sibling `.metadata.json` file. For example,
 `1.7.1-stopword-overlap.trec` has `1.7.1-stopword-overlap.metadata.json`:
 
 ```json
@@ -131,3 +132,10 @@ local reports are wanted; tracking errors never silently switch to local-only mo
 ```
 
 Tests use small fixtures and temporary tracking storage, not project experiments.
+
+Dense retrieval uses this same mechanism: `retrieval.embedding_model` identifies
+its configurable FastEmbed model, alongside `retrieval.vector_dimension`,
+`retrieval.distance`, and `retrieval.qdrant_collection`. Compare different dense
+models and lexical methods in the same dataset experiment. Each invocation logs
+a new run; use `--log-rankings` to retain ranking artifacts when local files are
+subsequently replaced. See [dense retrieval](../modelling/README.md#dense-retrieval).

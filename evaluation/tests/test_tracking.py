@@ -108,6 +108,53 @@ class TrackingTests(unittest.TestCase):
         self.assertEqual(by_name["empty.trec"].data.tags["retrieval.metadata"], "unknown")
         self.assertNotIn("rankings", {a.path for a in self.client.list_artifacts(by_name["model.trec"].info.run_id)})
 
+    def test_dense_model_is_a_run_parameter_in_the_dataset_experiment(self):
+        metadata = {"dataset": self.dataset, "split": "test", "parameters": {
+            "method": "dense-retrieval", "version": "2.1.1", "top_k": 10,
+            "embedding_runtime": "FastEmbed", "embedding_model": "example/multilingual",
+            "vector_dimension": 384, "distance": "Cosine", "qdrant_collection": "example",
+        }}
+        self.run.with_suffix(".metadata.json").write_text(json.dumps(metadata), encoding="utf-8")
+        self.invoke()
+        run = self.runs()[0]
+        self.assertEqual(run.data.params["retrieval.embedding_model"], "example/multilingual")
+        self.assertEqual(run.data.params["retrieval.vector_dimension"], "384")
+        self.assertEqual(run.data.tags["dataset"], self.dataset)
+
+    def test_benchmark_configurations_have_distinct_run_names_and_identity_parameters(self):
+        rankings = []
+        for identifier, model in (("dense-a", "example/a"), ("dense-b", "example/b")):
+            ranking = self.directory / f"2.1.1-dense-retrieval__{identifier}.trec"
+            ranking.write_bytes(self.run.read_bytes())
+            metadata = {
+                "dataset": self.dataset,
+                "split": "test",
+                "parameters": {
+                    "method": "dense-retrieval",
+                    "retrieval_method": "2.1.1-dense-retrieval",
+                    "experiment_id": ranking.stem,
+                    "embedding_model": model,
+                    "top_k": 10,
+                },
+            }
+            ranking.with_suffix(".metadata.json").write_text(
+                json.dumps(metadata), encoding="utf-8"
+            )
+            rankings.append(ranking)
+        self.invoke([
+            "--qrels", str(self.qrels), "--dataset", self.dataset, "--split", "test",
+            "--run", *map(str, rankings), "--output-dir", str(self.output),
+        ])
+        runs = self.runs()
+        self.assertEqual(
+            {run.data.tags["mlflow.runName"] for run in runs},
+            {f"{ranking.name} - test" for ranking in rankings},
+        )
+        by_id = {run.data.params["retrieval.experiment_id"]: run for run in runs}
+        self.assertEqual(set(by_id), {ranking.stem for ranking in rankings})
+        self.assertEqual(by_id[rankings[0].stem].data.params["retrieval.embedding_model"], "example/a")
+        self.assertEqual(by_id[rankings[1].stem].data.params["retrieval.embedding_model"], "example/b")
+
     def test_nondefault_relevance_and_optional_ranking_artifact(self):
         self.invoke(self.arguments + ["--relevance-level", "2", "--log-rankings"])
         run = self.runs()[0]

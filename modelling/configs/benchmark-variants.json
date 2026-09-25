@@ -1,0 +1,21 @@
+{
+  "version": 1,
+  "variants": {
+    "dense_models": [
+      {
+        "id": "multilingual-minilm",
+        "value": "sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2"
+      },
+      {
+        "id": "potion-multilingual",
+        "value": "minishlab/potion-multilingual-128M"
+      }
+    ],
+    "sparse_models": [
+      {
+        "id": "bm42",
+        "value": "Qdrant/bm42-all-minilm-l6-v2-attentions"
+      }
+    ]
+  }
+}

@@ -219,3 +219,7 @@ __marimo__/
 
 # Big Data
 */data
+
+# Optional local service storage must never be committed.
+/infrastructure/qdrant/storage/
+/infrastructure/qdrant/snapshots/

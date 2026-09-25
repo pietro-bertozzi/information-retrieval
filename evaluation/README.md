@@ -66,11 +66,12 @@ TREC ranks must be positive integers, but scores determine the evaluated order.
 For retrieval followed by evaluation, run the following from the repository root:
 
 ```bash
-python run_experiments.py --dataset scifact
+python -m experiments.run_experiments --dataset scifact
 ```
 
-The orchestrator passes only the current invocation's rankings, once per
-dataset/split. See the
+The orchestrator passes successfully produced rankings, plus validated existing
+pairs explicitly selected by `--benchmark --resume`, once per dataset/split.
+Reused rankings are evaluated again and receive new MLflow runs. See the
 [root workflow](../README.md#workflow). The commands below evaluate existing
 rankings directly.
 

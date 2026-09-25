@@ -30,10 +30,11 @@ is the number of documents containing word `t`.
 | `1.8.1` | [IDF-only overlap](scripts/1.8.1-idf-overlap.py) | Sum of `ln((N + 1) / (df(t) + 1)) + 1` over distinct shared words |
 | `1.9.1` | [unigram + bigram overlap](scripts/1.9.1-unigram-bigram-overlap.py) | Distinct shared words plus distinct shared adjacent word pairs |
 
-Each version is a complete, standalone script with its own tokenization,
+Each lexical version is a complete, standalone script with its own tokenization,
 indexing, scoring, input validation, and output handling. Code is intentionally
-repeated so versions can be read and changed independently. There is no shared
-modelling helper. Tests in `modelling/tests/` cover retrieval sidecar output.
+repeated so versions can be read and changed independently. Vector methods share
+only narrow validation/model-loading helpers. Tests in `modelling/tests/` cover
+retrieval sidecars and vector-index lifecycle.
 
 Version 1.1.2 divides all scores for one query by the same constant, preserving
 rankings and evaluation metrics. The document-length variants can change the
@@ -50,7 +51,7 @@ Other prepared datasets work through the same `--dataset` argument. Query and
 document IDs are preserved exactly, including leading zeros. Retrieval does
 not read relevance judgments or use them to select candidates.
 
-All versions lowercase text and extract Unicode alphanumeric sequences.
+All lexical versions lowercase text and extract Unicode alphanumeric sequences.
 Punctuation and underscores separate words; accents and numbers are retained.
 There is no stemming. Only version 1.8.1 uses IDF weighting.
 
@@ -87,7 +88,7 @@ document ID as strings, matching evaluation.
 The normal workflow runs retrieval and evaluation together from the repository root:
 
 ```bash
-python run_experiments.py --dataset scifact
+python -m experiments.run_experiments --dataset scifact
 ```
 
 See the [root workflow](../README.md#workflow) for method selection, dataset
@@ -103,7 +104,7 @@ Run these Linux commands from the repository root. For example, run Jaccard:
 To generate all eleven runs:
 
 ```bash
-for script in modelling/scripts/*.py; do
+for script in modelling/scripts/1.*.py; do
     ./.venv/bin/python "$script" --dataset scifact || exit 1
 done
 ```
@@ -118,6 +119,114 @@ Each run rebuilds its index. The larger MARCO datasets require substantially mor
 RAM and processing time with these deliberately simple indexes. Full initial
 runs and evaluation were performed on SciFact and JuriFindIT; the MARCO datasets
 have not been run end to end with these methods.
+
+## Configured benchmark
+
+A retrieval **method** is a script, such as `1.1.1-term-overlap` or
+`2.1.1-dense-retrieval`. An experiment **configuration** is one invocation of
+that method with concrete settings. `modelling/scripts/` is the source of truth
+for methods: every public Python script is discovered automatically. Ordinary
+methods, including all 1.x lexical methods, need no benchmark configuration entry.
+
+[benchmark-variants.json](configs/benchmark-variants.json) is the researcher-editable
+selection of benchmark values. It contains no retrieval-script inventory, cache
+paths, generated model metadata, or fusion defaults:
+
+```json
+{
+  "version": 1,
+  "variants": {
+    "dense_models": [
+      {"id": "multilingual-minilm", "value": "sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2"},
+      {"id": "potion-multilingual", "value": "minishlab/potion-multilingual-128M"}
+    ],
+    "sparse_models": [
+      {"id": "bm42", "value": "Qdrant/bm42-all-minilm-l6-v2-attentions"}
+    ]
+  }
+}
+```
+
+Add or remove objects under `dense_models` and `sparse_models` to change the model
+selection. `id` is a unique, stable lowercase filename slug; `value` is the exact
+value passed to the method's declared CLI option. The default catalog selects
+MiniLM and Potion plus BM42, producing exactly five vector configurations.
+MPNet is excluded only from this default catalog; explicit model overrides remain
+available.
+
+Configurable scripts opt in by defining a literal module-level declaration:
+
+```python
+EXPERIMENT_CAPABILITY = {
+    "version": 1,
+    "dimensions": {"dense_models": "embedding-model"},
+}
+```
+
+The orchestrator parses this declaration as data without importing the module.
+Optional `parameter_names` maps CLI names to existing metadata fields, and
+`parameters` declares fixed search/fusion settings for resume validation.
+See [the capability and artifact contract](../experiments/README.md).
+Dense consumes `dense_models`, sparse consumes `sparse_models`, and hybrid declares
+both dimensions with its two corresponding CLI options. Consequently dense and
+sparse expand independently, while hybrid receives the dense × sparse Cartesian
+product automatically. A future configurable method participates by declaring
+its dimensions and adding their selected values to the configuration; production
+orchestrator code does not change. A future ordinary script needs only to exist
+under `modelling/scripts/` and remains available in normal mode.
+
+Run the configured benchmark on SciFact or all runnable datasets:
+
+```text
+python -m experiments.run_experiments --dataset scifact --benchmark
+python -m experiments.run_experiments --all --benchmark
+python -m experiments.run_experiments --dataset scifact --benchmark --resume
+```
+
+Use `python -m experiments.run_experiments --list` to inspect discovery and the expanded
+benchmark summary. `--benchmark-config PATH` selects another validated configuration
+with `--benchmark` or `--list`. Benchmark mode runs only scripts that expose the
+capability declaration; it never reruns ordinary lexical methods. It rejects
+`--method` and `--method-option` so configuration and command-line settings cannot
+silently override each other.
+Manual runs remain available:
+
+```text
+python -m experiments.run_experiments --dataset scifact --method 1.1.1-term-overlap
+python -m experiments.run_experiments --dataset scifact --method 2.1.1-dense-retrieval
+python -m experiments.run_experiments --dataset scifact --method 2.1.1-dense-retrieval --method-option 2.1.1-dense-retrieval:embedding-model=minishlab/potion-multilingual-128M
+```
+
+Benchmark rankings use deterministic names such as:
+
+```text
+2.1.1-dense-retrieval__multilingual-minilm.trec
+2.2.1-sparse-retrieval__bm42.trec
+2.3.1-hybrid-retrieval__multilingual-minilm__bm42.trec
+```
+
+Each sidecar retains the retrieval script's model and index metadata and adds
+`retrieval_method` plus `experiment_id`. The evaluator therefore creates a
+distinct MLflow run name from each filename and logs the stable identity and
+embedding/fusion settings as `retrieval.*` parameters. Rankings remain under
+`modelling/data/<dataset>/<split>/`; the combined report remains under
+`evaluation/data/<dataset>/<split>/`.
+
+Each configuration stages and validates its own ranking and metadata, then publishes
+the pair under its experiment ID. If a later configuration fails, earlier successes
+remain published and are still evaluated/logged. The evaluator receives only
+successful outputs produced by the current invocation, never a stale file left by
+a failed configuration. Failures are reported and the overall command returns
+nonzero. Compatible Qdrant indexes are still reused by the retrieval scripts;
+changing a model selects its compatible model/corpus-specific collection or creates
+a new one. `--overwrite` replaces ranking files only and never rebuilds indexes.
+
+Resume reuses only valid pairs matching dataset, split, method, configuration ID,
+actual model values, top-k and declared search/fusion settings. Existing completed
+SciFact filenames are preserved. Reused rankings are evaluated again; each
+evaluation creates a new MLflow run. Resume does not repair interrupted Qdrant
+collections. Legacy metadata cannot establish unchanged query/corpus bytes or
+detect every structurally valid truncation; see the experiments documentation.
 
 ## Outputs and evaluation
 
@@ -152,7 +261,7 @@ storage, comparison, and the sidecar format for external methods.
 Run and compare all current versions with:
 
 ```bash
-python run_experiments.py --dataset scifact
+python -m experiments.run_experiments --dataset scifact
 ```
 
 This selects the scripts currently on disk and excludes retired ranking files.
@@ -171,7 +280,7 @@ evaluation.
 
 ## JuriFindIT
 
-All eleven models were run against 23,617 prepared documents and 179 queries
+All eleven lexical models were run against 23,617 prepared documents and 179 queries
 in `--split test` (the original validation split), using `--top-k 1000`.
 The stopword model automatically selects Italian. No training or parameter
 tuning is required. See the [comparison results](../evaluation/README.md#jurifindit-results).
@@ -179,7 +288,7 @@ tuning is required. See the [comparison results](../evaluation/README.md#jurifin
 To reproduce in Windows PowerShell from the repository root:
 
 ```powershell
-& ./.venv/Scripts/python.exe -B run_experiments.py --dataset jurifindit
+& ./.venv/Scripts/python.exe -B -m experiments.run_experiments --dataset jurifindit
 ```
 
 This refreshes the selected methods and local reports and logs new MLflow runs.
@@ -201,3 +310,239 @@ overridden this way. Keep MLflow integration in the evaluator.
 ```powershell
 & ./.venv/Scripts/python.exe -B -m unittest discover -s modelling/tests -p 'test_*.py' -v
 ```
+
+## Dense retrieval
+
+`2.1.1-dense-retrieval.py` is one configurable dense bi-encoder baseline. FastEmbed
+is the CPU embedding runtime; the embedding model is an experiment parameter;
+Qdrant stores document vectors and returns their cosine-similarity ranking.
+The method reads the same normalized corpus/query JSONL as the lexical methods.
+It embeds original text without lexical tokenization and never reads qrels.
+
+### Model configurations
+
+These are embedding-model configurations of the same
+`2.1.1-dense-retrieval` method. MiniLM and Potion are the default benchmark choices;
+MPNet is an optional explicit model. The identifiers and
+dimensions below come from the installed FastEmbed 0.8.1 registry.
+
+| FastEmbed model identifier | Family | Languages | Dimension | Why include it | Query/document encoding |
+| --- | --- | --- | ---: | --- | --- |
+| `sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2` | multilingual MiniLM sentence transformer | 50+ languages, including English and Italian | 384 | Smallest transformer baseline in the set; approximately 0.22 GB in FastEmbed. This remains the deterministic default. | No prefixes required. The method still calls `passage_embed` and `query_embed` explicitly. |
+| `minishlab/potion-multilingual-128M` | POTION/Model2Vec static model distilled from BGE-M3 | 101 languages, including English and Italian | 256 | A meaningfully different static/distilled approach with fast CPU inference; approximately 0.51 GB in FastEmbed. | No prefixes required. The method still calls `passage_embed` and `query_embed` explicitly. |
+| `sentence-transformers/paraphrase-multilingual-mpnet-base-v2` | multilingual MPNet sentence transformer | 50+ languages, including English and Italian | 768 | A larger, higher-capacity transformer comparison while remaining practical locally; approximately 1.0 GB in FastEmbed. | No prefixes required. The method still calls `passage_embed` and `query_embed` explicitly. |
+
+The `sentence-transformers/` prefix is part of two model identifiers; the
+Sentence Transformers Python framework is not used. These are initial
+representatives, not a claim that one will win on every dataset. The CLI remains
+open to any dense model supported by the installed FastEmbed version; no script
+or orchestrator registry change is needed. See [FastEmbed's model catalog](https://qdrant.github.io/fastembed/examples/Supported_Models/),
+the [POTION model card](https://huggingface.co/minishlab/potion-multilingual-128M),
+and the Sentence Transformers [multilingual model documentation](https://www.sbert.net/docs/sentence_transformer/pretrained_models.html).
+
+### Setup and commands
+
+From the repository root, with the project environment active:
+
+```text
+python -m pip install -r requirements.txt
+docker compose -f infrastructure/qdrant/compose.yaml up -d
+python -m experiments.run_experiments --dataset scifact --method 2.1.1-dense-retrieval
+```
+
+This reuses the local Docker server configuration (Qdrant 1.19.1) without running
+or importing the learning demo. Collection metadata requires a recent server;
+use the pinned Compose image. Open <http://localhost:6333/dashboard> to inspect
+collections. HTTP uses localhost port 6333; 6334 is reserved for gRPC.
+On Windows without environment activation, replace `python` with
+`& ./.venv/Scripts/python.exe` in PowerShell.
+
+Run each configuration explicitly using the existing generic method-option interface:
+
+```text
+python -m experiments.run_experiments --dataset scifact --method 2.1.1-dense-retrieval --method-option 2.1.1-dense-retrieval:embedding-model=sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2
+python -m experiments.run_experiments --dataset scifact --method 2.1.1-dense-retrieval --method-option 2.1.1-dense-retrieval:embedding-model=minishlab/potion-multilingual-128M
+python -m experiments.run_experiments --dataset scifact --method 2.1.1-dense-retrieval --method-option 2.1.1-dense-retrieval:embedding-model=sentence-transformers/paraphrase-multilingual-mpnet-base-v2
+```
+
+These are three separate manual invocations. Normal `--all` still runs one dense
+configuration using the default unless an explicit `embedding-model` option is
+supplied; `--benchmark` expands the configured variants. Each invocation logs its model
+as `retrieval.embedding_model` in the dataset's MLflow experiment. Add
+`--log-rankings` when the ranking file itself should remain attached to each run;
+the next invocation replaces this method's local TREC and metadata files.
+
+The script also works directly, producing retrieval outputs only:
+
+```text
+python modelling/scripts/2.1.1-dense-retrieval.py --dataset scifact --split test --top-k 1000 --overwrite
+```
+
+Additional method options are `qdrant-url`, `batch-size` (default 32), `threads`
+(default 2), and `rebuild-index`. For example, explicitly rebuild the selected index:
+
+```text
+python -m experiments.run_experiments --dataset scifact --method 2.1.1-dense-retrieval --method-option 2.1.1-dense-retrieval:rebuild-index=true
+```
+
+Direct invocation also accepts bare `--rebuild-index`. **`--overwrite` replaces
+ranking/metadata files only; it never authorizes index deletion.**
+
+### Indexing and reuse
+
+1. Validate normalized records and fingerprint the corpus bytes with SHA-256.
+2. Derive `ir_dense_<dataset>_<configuration-hash>` from dataset, corpus hash,
+   count, embedding model/definition, resolved weight/tokenizer file hashes,
+   FastEmbed/ONNX Runtime versions, dimension, CPU provider,
+   passage/query encoding convention, and cosine distance. Splits share document
+   vectors; split and top-k do not change the collection identity.
+3. Reuse an existing collection only if its stored manifest, completion flag,
+   vector dimension/distance, and exact point count match. Incompatibility is an
+   error, not an automatic delete/rebuild.
+4. Otherwise embed documents in bounded batches and upload points, waiting for
+   each write. Mark the collection complete only after checking corpus stability
+   and stored point count. Interrupted indexes require explicit rebuilding.
+5. Embed queries with the same model's `query_embed`, search Qdrant, and write
+   finite scores and original IDs to TREC. Empty/incomplete unexpected results
+   fail the run without replacing previous ranking files.
+
+Qdrant point IDs are sequential integers; payload `doc_id` preserves the exact
+normalized identifier, including leading zeros. Only vectors and this ID mapping
+are uploaded; text remains in the normalized corpus. Corpus vectors use
+`passage_embed`. Query vectors are searched, not stored. Qdrant handles cosine
+normalization. Search uses `hnsw_ef=128`, `exact=False`; Qdrant may scan small
+collections directly. Scores are sorted descending, with reverse document-ID
+tie ordering matching the evaluator.
+
+A different model, corpus revision, dimension, or recorded embedding configuration
+gets a different collection. Old collections remain until explicitly removed.
+Rebuild deletes only the collection matching the current identity. Run one writer
+per collection; concurrent indexing/rebuilds are not supported. Do not manually
+modify managed collection points or metadata.
+
+### Outputs and tracking
+
+Defaults produce:
+
+- `modelling/data/<dataset>/<split>/2.1.1-dense-retrieval.trec`
+- `modelling/data/<dataset>/<split>/2.1.1-dense-retrieval.metadata.json`
+- Existing evaluator reports under `evaluation/data/<dataset>/<split>/`.
+
+The sidecar follows the existing `dataset`, `split`, scalar `parameters` schema.
+It records the model/runtime, dimension, collection, corpus hash, distance,
+model-file fingerprint, index reuse, batching/thread settings, search settings,
+and software versions.
+Evaluation logs these as `retrieval.*` parameters, including
+**`retrieval.embedding_model`**, inside the **dataset's MLflow experiment**.
+Modelling has no MLflow dependency or logging code.
+
+Each manual orchestrator invocation creates a new MLflow run but replaces this method's
+local ranking files. To retain rankings for model comparisons, use the
+orchestrator's `--log-rankings` option or copy each ranking and its sidecar before
+the next invocation. Selecting all methods includes exactly one dense run with
+the default (or explicitly supplied) model. It does not enumerate FastEmbed models.
+Lexical-only selections do not contact Qdrant or load embedding models.
+
+### Operational limits
+
+The first run downloads public model files; later runs reuse
+`modelling/data/.fastembed-cache/`. Inference is local and requires no API key.
+Inputs are fingerprinted/validated on reuse, but documents are not re-embedded.
+Embeddings are batched; duplicate-ID validation still keeps document IDs in memory.
+Long text is truncated according to the selected model; there is no chunking.
+Resolved model files are fingerprinted on each run, so changed weights/tokenizers
+under the same model name receive a separate index. Preserve the model cache to
+reproduce the exact weights later; the CLI does not select upstream revisions.
+
+Before MARCO-scale runs, review RAM/disk requirements, indexing time, model
+truncation, and approximate-search recall. No large-corpus benchmark or distributed
+indexing is provided. The development smoke test used five documents and two
+English/Italian queries, with real FastEmbed, Docker Qdrant, evaluation and MLflow.
+
+The reused Docker volume `ir-qdrant-learning-data` now holds dense indexes as well
+as the demo. `docker compose -f infrastructure/qdrant/compose.yaml down` preserves
+it; **`down --volumes` deletes all these indexes too**. The demo itself recreates
+only its separate `qdrant_learning_documents` collection.
+
+## Vector retrieval taxonomy
+
+The vector methods use the same prepared inputs and TREC/metadata output contract:
+
+| Family | Method | Representation and search |
+| --- | --- | --- |
+| 2.1 Dense | `2.1.1-dense-retrieval` | One full vector per text; Qdrant cosine search captures semantic similarity. |
+| 2.2 Sparse neural | `2.2.1-sparse-retrieval` | Learned nonzero token indices and weights; Qdrant sparse search keeps the representation sparse. |
+| 2.3 Hybrid | `2.3.1-hybrid-retrieval` | Dense and sparse searches feed Qdrant-native Reciprocal Rank Fusion (RRF). |
+
+Filesystem discovery means `--all` runs one default configuration of each vector
+method. Only `--benchmark` expands the dimensions declared by configurable methods.
+
+FastEmbed computes both kinds of embeddings. Qdrant stores and indexes them;
+it does not create embeddings. Corpus text uses `passage_embed`, while queries
+use `query_embed`, so models with distinct document/query behavior retain it.
+
+### Sparse neural retrieval
+
+The default sparse model is
+`Qdrant/bm42-all-minilm-l6-v2-attentions`, the installed FastEmbed 0.8.1
+registry's small BM42 neural sparse model. Document weights come from MiniLM
+attention, queries follow BM42's query encoder, and Qdrant applies its required
+IDF modifier. Sparse vectors remain `indices + values`; they are never expanded
+to dense arrays. BM42 is English-oriented, so Italian sparse and hybrid results
+should be treated as exploratory until a suitable multilingual sparse model is
+selected and tested.
+
+Run the default sparse configuration:
+
+```text
+python -m experiments.run_experiments --dataset scifact --method 2.2.1-sparse-retrieval
+```
+
+Override it with any sparse model supported by the installed FastEmbed version:
+
+```text
+python -m experiments.run_experiments --dataset scifact --method 2.2.1-sparse-retrieval --method-option 2.2.1-sparse-retrieval:embedding-model=<FASTEMBED_SPARSE_MODEL>
+```
+
+### Hybrid retrieval
+
+Hybrid retrieval uses the dense default
+`sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2` and the sparse
+BM42 default above. Each Qdrant point has named `dense` and `sparse` vectors.
+Qdrant retrieves `top_k` candidates independently from both indexes and combines
+their ranks with native RRF (`k=60`, equal influence). Rank fusion avoids treating
+dense cosine scores and sparse scores as directly comparable.
+
+```text
+python -m experiments.run_experiments --dataset scifact --method 2.3.1-hybrid-retrieval
+```
+
+Override either model independently through generic method options:
+
+```text
+python -m experiments.run_experiments --dataset scifact --method 2.3.1-hybrid-retrieval --method-option 2.3.1-hybrid-retrieval:dense-embedding-model=<FASTEMBED_DENSE_MODEL> --method-option 2.3.1-hybrid-retrieval:sparse-embedding-model=<FASTEMBED_SPARSE_MODEL>
+```
+
+### Sparse and hybrid index lifecycle
+
+Sparse uses a dedicated sparse-only collection. Hybrid uses a separate collection
+with named dense and sparse vectors; it does not alter or silently reuse the
+dense-only collection. Collection identities include the dataset, corpus hash and
+count, model definitions and downloaded-file fingerprints, runtime versions,
+vector configuration, dense dimension where applicable, and sparse IDF behavior.
+Completion metadata, collection configuration, and exact point count are checked
+before reuse. An incompatible or incomplete collection fails clearly.
+
+`--overwrite` replaces local TREC and metadata files only. Rebuild the selected
+method's exact collection explicitly when needed:
+
+```text
+python -m experiments.run_experiments --dataset scifact --method 2.2.1-sparse-retrieval --method-option 2.2.1-sparse-retrieval:rebuild-index=true
+python -m experiments.run_experiments --dataset scifact --method 2.3.1-hybrid-retrieval --method-option 2.3.1-hybrid-retrieval:rebuild-index=true
+```
+
+Sparse metadata records `sparse_embedding_model`, vector type/configuration, and
+the index fingerprint. Hybrid metadata records both embedding models, named-vector
+configuration, and RRF settings. The existing evaluator logs these scalar fields
+as `retrieval.*` MLflow parameters in the dataset experiment; retrieval scripts
+contain no MLflow logic.
