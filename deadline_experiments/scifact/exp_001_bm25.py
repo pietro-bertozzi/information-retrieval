@@ -1,19 +1,19 @@
-"""Independent BM25 experiment; smoke scores are sampled-corpus diagnostics."""
+"""Qdrant server-native BM25; smoke scores are sampled-corpus diagnostics."""
 
 import argparse
 import hashlib
-import heapq
 import json
 import math
-import re
 import sys
 import tempfile
 import time
 import uuid
-from collections import Counter, defaultdict
 from datetime import datetime, timezone
+from importlib.metadata import version
 from itertools import islice
 from pathlib import Path
+
+from qdrant_client import QdrantClient, models
 
 ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT / "evaluation" / "scripts"))
@@ -23,7 +23,9 @@ DATASET = "scifact"
 SOURCE_SPLIT = "test"
 METRICS = ["MAP", "Precision@1", "Precision@5", "Precision@10",
            "Recall@1", "Recall@5", "Recall@10", "MRR"]
-TOKEN_PATTERN = re.compile(r"[^\W_]+")
+QDRANT_URL = "http://localhost:6333"
+BM25_OPTIONS = {"k": 1.2, "b": 0.75, "avg_len": 256.0, "language": "english",
+                "tokenizer": "word", "lowercase": True, "ascii_folding": False}
 
 
 def read_records(path, id_field):
@@ -95,37 +97,100 @@ def load_data(data_dir, smoke):
     return documents, queries, qrels, sampling
 
 
-def tokenize(text):
-    return TOKEN_PATTERN.findall(text.lower())
+def point_id(doc_id):
+    # Preserve arbitrary source IDs (including leading zeros) in the payload.
+    return str(uuid.uuid5(uuid.NAMESPACE_URL, f"deadline_experiments:{DATASET}:{doc_id}"))
 
 
-def build_index(documents):
-    postings = defaultdict(list)
-    lengths = {}
-    for doc_id, text in documents.items():
-        counts = Counter(tokenize(text))
-        lengths[doc_id] = sum(counts.values())
-        for term, count in counts.items():
-            postings[term].append((doc_id, count))
-    average = sum(lengths.values()) / len(lengths) if lengths else 0
-    if not average:
-        raise ValueError("Corpus has no tokens")
-    return postings, lengths, average
+def document_payload(doc_id, text):
+    return {"doc_id": doc_id, "text_sha256": hashlib.sha256(text.encode("utf-8")).hexdigest()}
 
 
-def retrieve(query, postings, lengths, average, depth):
-    # BM25 with positive Robertson IDF, k1=1.2, b=0.75, unique query terms.
-    scores = defaultdict(float)
-    count = len(lengths)
-    for term in sorted(set(tokenize(query))):
-        matches = postings.get(term, ())
-        idf = math.log1p((count - len(matches) + 0.5) / (len(matches) + 0.5))
-        for doc_id, frequency in matches:
-            norm = 1.2 * (0.25 + 0.75 * lengths[doc_id] / average)
-            scores[doc_id] += idf * frequency * 2.2 / (frequency + norm)
-    # Include zero-score documents, with the evaluator's descending-ID tie rule.
-    return heapq.nlargest(depth, ((d, scores.get(d, 0.0)) for d in lengths),
-                         key=lambda item: (item[1], item[0]))
+def verify_collection(client, collection, documents):
+    if client.count(collection, exact=True).count != len(documents):
+        return False
+    records = iter(documents.items())
+    while batch := list(islice(records, 128)):
+        expected = {point_id(d): document_payload(d, text) for d, text in batch}
+        points = client.retrieve(collection, ids=list(expected), with_payload=True, with_vectors=["bm25"])
+        if len(points) != len(expected):
+            return False
+        for point in points:
+            if point.payload != expected.get(str(point.id)) or not isinstance(point.vector, dict):
+                return False
+            if not isinstance(point.vector.get("bm25"), models.SparseVector):
+                return False
+    return True
+
+
+def build_index(client, documents, mode, server_version):
+    digest = hashlib.sha256()
+    for doc_id in sorted(documents):
+        digest.update((json.dumps([doc_id, documents[doc_id]], ensure_ascii=False) + "\n").encode("utf-8"))
+    identity = {"owner": "deadline_experiments", "experiment": "exp_001_bm25",
+                "dataset": DATASET, "mode": mode, "model": "qdrant/bm25",
+                "options": BM25_OPTIONS, "modifier": "idf", "server_version": server_version,
+                "corpus_sha256": digest.hexdigest(), "document_count": len(documents)}
+    fingerprint = hashlib.sha256(json.dumps(identity, sort_keys=True).encode()).hexdigest()[:24]
+    prefix = f"deadline_{DATASET.replace('-', '_')}_exp001_bm25_{mode}_{fingerprint}"
+    existing = {c.name for c in client.get_collections().collections}
+    for name in sorted(existing):
+        if name != prefix and not name.startswith(prefix + "_"):
+            continue
+        info = client.get_collection(name)
+        sparse = info.config.params.sparse_vectors or {}
+        if (info.config.metadata == {"bm25_experiment": identity, "complete": True}
+                and not info.config.params.vectors and set(sparse) == {"bm25"}
+                and sparse["bm25"].modifier == models.Modifier.IDF
+                and verify_collection(client, name, documents)):
+            return name, {**identity, "collection": name, "reused": True}
+    # An incompatible or incomplete collection is never overwritten or deleted.
+    name = prefix if prefix not in existing else f"{prefix}_{uuid.uuid4().hex[:12]}"
+    client.create_collection(name, vectors_config={},
+                             sparse_vectors_config={"bm25": models.SparseVectorParams(modifier=models.Modifier.IDF)},
+                             metadata={"bm25_experiment": identity, "complete": False})
+    records = iter(documents.items())
+    while batch := list(islice(records, 128)):
+        client.upsert(name, points=[models.PointStruct(
+            id=point_id(d), payload=document_payload(d, text),
+            vector={"bm25": models.Document(text=text, model="qdrant/bm25", options=BM25_OPTIONS)},
+        ) for d, text in batch], wait=True)
+    if not verify_collection(client, name, documents):
+        raise RuntimeError(f"Qdrant collection verification failed: {name}")
+    client.update_collection(name, metadata={"bm25_experiment": identity, "complete": True})
+    return name, {**identity, "collection": name, "reused": False}
+
+
+def retrieve(client, collection, query, documents, depth):
+    limit = min(depth + 1, len(documents))
+    scores = {}
+    if query.strip():
+        while True:
+            points = client.query_points(
+                collection, query=models.Document(text=query, model="qdrant/bm25", options=BM25_OPTIONS),
+                using="bm25", limit=limit, with_payload=["doc_id"], with_vectors=False,
+            ).points
+            scores = {}
+            for point in points:
+                doc_id = (point.payload or {}).get("doc_id")
+                if doc_id not in documents or str(point.id) != point_id(doc_id) or doc_id in scores:
+                    raise RuntimeError("Qdrant returned an invalid or duplicate source document ID")
+                if not math.isfinite(point.score) or point.score < 0:
+                    raise RuntimeError("Qdrant returned an invalid BM25 score")
+                scores[doc_id] = point.score
+            ordered = sorted(scores.items(), key=lambda item: (item[1], item[0]), reverse=True)
+            # Fetch every tie at the cutoff before applying the evaluator's ID tie rule.
+            if (len(points) < limit or limit == len(documents)
+                    or (len(ordered) > depth and ordered[-1][1] < ordered[depth - 1][1])):
+                break
+            limit = min(limit * 2, len(documents))
+    # Preserve the prior complete-ranking policy: unmatched documents have score zero.
+    if len(scores) < depth:
+        for doc_id in sorted(documents, reverse=True):
+            scores.setdefault(doc_id, 0.0)
+            if len(scores) >= depth:
+                break
+    return sorted(scores.items(), key=lambda item: (item[1], item[0]), reverse=True)[:depth]
 
 
 def write_json(path, value):
@@ -145,16 +210,25 @@ def main(argv=None):
     documents, queries, qrels, sampling = load_data(args.data_dir, args.smoke)
     loaded = time.perf_counter()
     print(f"{DATASET} mode={mode_name}: {sampling}", flush=True)
-    postings, lengths, average = build_index(documents)
     depth = len(documents) if args.smoke else min(1000, len(documents))
     execution_id = uuid.uuid4().hex
     output = Path(__file__).resolve().parent / "data" / mode_name / execution_id
     output.mkdir(parents=True, exist_ok=False)
-    ranking = output / f"exp_001_baseline_{execution_id}.trec"
-    with ranking.open("w", encoding="utf-8") as stream:
-        for query_id, text in queries.items():
-            for rank, (doc_id, score) in enumerate(retrieve(text, postings, lengths, average, depth), 1):
-                stream.write(f"{query_id} Q0 {doc_id} {rank} {score:.17g} bm25\n")
+    ranking = output / f"exp_001_bm25_{execution_id}.trec"
+    # This flag forwards Document objects to localhost; it disables client-side FastEmbed.
+    qdrant = QdrantClient(url=QDRANT_URL, cloud_inference=True, timeout=60)
+    try:
+        server_version = qdrant.info().version
+        collection, index_info = build_index(qdrant, documents, mode_name, server_version)
+        indexed = time.perf_counter()
+        with ranking.open("w", encoding="utf-8") as stream:
+            for query_id, text in queries.items():
+                results = retrieve(qdrant, collection, text, documents, depth)
+                for rank, (doc_id, score) in enumerate(results, 1):
+                    stream.write(f"{query_id} Q0 {doc_id} {rank} {score:.17g} bm25\n")
+        write_json(output / "qdrant.json", index_info)
+    finally:
+        qdrant.close()
     retrieved = time.perf_counter()
     qrels_path = output / "qrels.jsonl"
     with qrels_path.open("w", encoding="utf-8") as stream:
@@ -164,8 +238,16 @@ def main(argv=None):
     experiment = f"deadline-{DATASET}"
     parameters = {
         "dataset": DATASET, "mode": mode_name, "method": "bm25", "k1": 1.2, "b": 0.75,
-        "idf": "log(1 + (N - df + 0.5) / (df + 0.5))",
-        "tokenization": "lowercase Unicode alphanumeric words; distinct query terms; no stemming or stopwords",
+        "engine": "qdrant-server", "implementation": "server-native qdrant/bm25",
+        "qdrant_url": QDRANT_URL, "qdrant_server_version": server_version,
+        "qdrant_client_version": version("qdrant-client"), "collection": collection,
+        "collection_reused": index_info["reused"], "corpus_sha256": index_info["corpus_sha256"],
+        "bm25_options": json.dumps(BM25_OPTIONS, sort_keys=True),
+        "python_version": sys.version.split()[0],
+        "idf": "Qdrant collection modifier=idf",
+        "avg_len": BM25_OPTIONS["avg_len"], "language": BM25_OPTIONS["language"],
+        "tokenization": "server word tokenizer; lowercase; native language stopwords and Snowball stemming",
+        "zero_score_policy": "append unmatched documents with zero score in descending source ID order",
         "top_k": depth, "data_dir": str(args.data_dir.resolve()), **sampling,
     }
     write_json(ranking.with_suffix(".metadata.json"), {
@@ -192,6 +274,8 @@ def main(argv=None):
     evaluated = time.perf_counter()
     report = json.loads((output / "report.json").read_text(encoding="utf-8"))
     write_json(output / "metrics.json", report["runs"][0]["aggregate"])
+    write_json(output / "retrieval.json", report["runs"][0]["retrieval"])
+    write_json(output / "metric-names.json", {name: evaluate.metric_key(name) for name in report["metrics"]})
     from mlflow import MlflowClient
 
     # Explicit persistent local store: no server or environment override is needed.
@@ -208,15 +292,18 @@ def main(argv=None):
         raise RuntimeError(f"Expected one persisted run, found {len(runs)}")
     run_id = runs[0].info.run_id
     try:
-        for key, value in {"mode": mode_name, "dataset": DATASET, "experiment": "exp_001_baseline",
-                           "score_scope": "sampled-corpus diagnostic" if args.smoke else "full corpus, top 1000"}.items():
+        tags = {"mode": mode_name, "dataset": DATASET, "experiment": "exp_001_bm25",
+                "execution_id": execution_id, "mlflow.runName": f"exp_001_bm25_{mode_name}",
+                "score_scope": "sampled-corpus diagnostic" if args.smoke else "full corpus, top 1000"}
+        for key, value in tags.items():
             client.set_tag(run_id, key, value)
-        extra = ["sample.json", "metrics.json", "qrels.jsonl"]
+        extra = ["sample.json", "metrics.json", "qrels.jsonl", "qdrant.json"]
         if args.smoke:
             extra += ["corpus.jsonl", "queries.jsonl"]
         for filename in extra:
             client.log_artifact(run_id, str(output / filename))
-        timings = {"load_seconds": loaded - started, "retrieval_seconds": retrieved - loaded,
+        timings = {"load_seconds": loaded - started, "index_seconds": indexed - loaded,
+                   "retrieval_seconds": retrieved - indexed,
                    "evaluation_and_export_seconds": evaluated - retrieved,
                    "elapsed_seconds": time.perf_counter() - started}
         write_json(output / "timing.json", timings)
@@ -231,6 +318,9 @@ def main(argv=None):
         for key, value in parameters.items():
             if persisted.data.params.get(f"retrieval.{key}") != str(value):
                 raise RuntimeError(f"Persisted parameter mismatch: {key}")
+        for key, value in tags.items():
+            if persisted.data.tags.get(key) != value:
+                raise RuntimeError(f"Persisted tag mismatch: {key}")
         checksums = {}
         paths = [p.path for p in client.list_artifacts(run_id) if not p.is_dir]
         paths += [p.path for p in client.list_artifacts(run_id, "rankings")]
@@ -243,7 +333,7 @@ def main(argv=None):
                 downloaded = Path(client.download_artifacts(run_id, path, temporary))
                 digest = hashlib.sha256(downloaded.read_bytes()).hexdigest()
                 local = output / Path(path).name
-                if local.exists() and digest != hashlib.sha256(local.read_bytes()).hexdigest():
+                if digest != hashlib.sha256(local.read_bytes()).hexdigest():
                     raise RuntimeError(f"Artifact content mismatch: {path}")
                 checksums[path] = digest
         verification = {"run_id": run_id, "tracking_uri": uri, "status": persisted.info.status,
